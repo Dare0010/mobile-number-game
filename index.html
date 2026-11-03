@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>双人猜数字 - 手机对战</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --bg-color: #f3f4f6;
+            --card-bg: #ffffff;
+            --text-main: #1f2937;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+        body { background-color: var(--bg-color); color: var(--text-main); padding: 12px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+        
+        .container { width: 100%; max-width: 480px; background: var(--card-bg); border-radius: 20px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        .header { text-align: center; margin-bottom: 12px; }
+        .header h2 { font-size: 1.3rem; }
+        .player-tag { display: inline-block; padding: 4px 12px; background: #e0e7ff; color: #4338ca; border-radius: 20px; font-weight: 600; font-size: 0.85rem; margin-top: 4px; }
+
+        .status-bar { text-align: center; padding: 10px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; font-weight: 600; font-size: 0.9rem; margin-bottom: 12px; color: #374151; }
+
+        .box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+        .box-title { font-size: 0.8rem; font-weight: 700; color: #6b7280; margin-bottom: 8px; text-transform: uppercase; }
+        
+        .input-group { display: flex; gap: 8px; }
+        input { flex: 1; padding: 10px; border: 1px solid #d1d5db; border-radius: 10px; outline: none; font-size: 1rem; -webkit-appearance: none; }
+        input:focus { border-color: var(--primary-color); }
+        
+        button { padding: 10px 16px; background: var(--primary-color); color: white; border: none; border-radius: 10px; font-weight: 600; font-size: 0.95rem; cursor: pointer; }
+        button:disabled { background: #9ca3af; }
+
+        .history-box { height: 160px; overflow-y: auto; background: white; border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+        .log-item { font-size: 0.85rem; padding: 6px 10px; border-radius: 6px; background: #f3f4f6; line-height: 1.4; }
+        .log-item.highlight { background: #dcfce7; color: #166534; font-weight: 600; }
+
+        .modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; justify-content: center; align-items: center; opacity: 0; pointer-events: none; transition: 0.3s; z-index: 99; }
+        .modal.show { opacity: 1; pointer-events: auto; }
+        .modal-content { background: white; padding: 24px; border-radius: 16px; text-align: center; max-width: 320px; width: 85%; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h2>🔢 异地双人猜数字</h2>
+            <div id="player-role" class="player-tag">正在连接...</div>
+        </div>
+
+        <div id="status-text" class="status-bar">等待另一位玩家加入... (1/2)</div>
+
+        <!-- 密码设定 -->
+        <div class="box">
+            <div class="box-title">1. 设定你的 4 位密码</div>
+            <div class="input-group">
+                <input type="tel" id="secret-input" maxlength="4" placeholder="例如: 1234">
+                <button id="btn-lock" onclick="lockSecret()">锁定密码</button>
+            </div>
+        </div>
+
+        <!-- 向对方猜测 -->
+        <div class="box">
+            <div class="box-title">2. 猜测对方密码</div>
+            <div class="input-group">
+                <input type="tel" id="guess-input" maxlength="4" placeholder="输入4位数字" disabled>
+                <button id="btn-guess" onclick="sendGuess()" disabled>发送猜测</button>
+            </div>
+        </div>
+
+        <!-- 回答对方 -->
+        <div class="box">
+            <div class="box-title">3. 回答对方猜测</div>
+            <p id="reply-hint" style="font-size:0.8rem; color:#6b7280; margin-bottom:6px;">等待对方猜数...</p>
+            <div class="input-group">
+                <input type="number" id="reply-input" min="0" max="4" placeholder="正确个数 0-4" disabled>
+                <button id="btn-reply" onclick="sendReply()" disabled>提交反馈</button>
+            </div>
+        </div>
+
+        <div class="box-title">对局记录</div>
+        <div id="history-box" class="history-box"></div>
+    </div>
+
+    <!-- 结算弹窗 -->
+    <div id="win-modal" class="modal">
+        <div class="modal-content">
+            <h3 id="win-title">游戏结束</h3>
+            <p id="win-desc" style="margin: 12px 0; color: #4b5563; font-size: 0.9rem;"></p>
+            <button onclick="location.reload()" style="width: 100%;">重新开始</button>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let myPlayerNo = 0;
+        let isMyTurn = false;
+
+        socket.on('init-player', (data) => {
+            myPlayerNo = data.playerNo;
+            document.getElementById('player-role').innerText = `我是：玩家 ${myPlayerNo}`;
+        });
+
+        socket.on('room-full', (msg) => { alert(msg); });
+
+        socket.on('player-status', (data) => {
+            if (data.count < 2) {
+                document.getElementById('status-text').innerText = `等待另一位玩家加入... (${data.count}/2)`;
+            } else {
+                document.getElementById('status-text').innerText = '玩家已就位，请双方设定并锁定密码！';
+            }
+        });
+
+        function lockSecret() {
+            const val = document.getElementById('secret-input').value.trim();
+            if (!/^\d{4}$/.test(val)) return alert('请输入有效的 4 位数字！');
+
+            socket.emit('lock-secret', val);
+            document.getElementById('secret-input').disabled = true;
+            document.getElementById('btn-lock').disabled = true;
+            appendLog('你已锁定密码，等待对方锁定...');
+        }
+
+        socket.on('wait-for-other-lock', () => {
+            document.getElementById('status-text').innerText = '等待对方锁定密码...';
+        });
+
+        socket.on('other-player-locked', () => {
+            appendLog('对方已锁定密码！');
+        });
+
+        socket.on('game-start', (data) => {
+            appendLog('双方已锁定，游戏开始！', true);
+            handleTurn(data.currentTurn);
+        });
+
+        function handleTurn(currentTurn) {
+            isMyTurn = (currentTurn === myPlayerNo);
+            const statusText = document.getElementById('status-text');
+            const guessInput = document.getElementById('guess-input');
+            const btnGuess = document.getElementById('btn-guess');
+
+            if (isMyTurn) {
+                statusText.innerText = '🎯 你的回合：请输入猜测！';
+                guessInput.disabled = false;
+                btnGuess.disabled = false;
+            } else {
+                statusText.innerText = '⏳ 对方思考/猜测中...';
+                guessInput.disabled = true;
+                btnGuess.disabled = true;
+            }
+        }
+
+        function sendGuess() {
+            const val = document.getElementById('guess-input').value.trim();
+            if (!/^\d{4}$/.test(val)) return alert('请输入 4 位数字！');
+
+            socket.emit('send-guess', val);
+            document.getElementById('guess-input').value = '';
+            document.getElementById('guess-input').disabled = true;
+            document.getElementById('btn-guess').disabled = true;
+        }
+
+        socket.on('guess-made', (data) => {
+            if (data.guesser === myPlayerNo) {
+                appendLog(`你猜对方：【${data.guessNum}】，等待对方反馈...`);
+            } else {
+                appendLog(`对方猜你：【${data.guessNum}】，请给出反馈！`);
+                document.getElementById('reply-hint').innerText = `对方猜了 ${data.guessNum}，位置正确个数：`;
+                document.getElementById('reply-input').disabled = false;
+                document.getElementById('btn-reply').disabled = false;
+                document.getElementById('status-text').innerText = '👉 请回答对方的猜测！';
+            }
+        });
+
+        function sendReply() {
+            const val = document.getElementById('reply-input').value.trim();
+            if (val === '' || val < 0 || val > 4) return alert('请输入 0-4 的数字！');
+
+            socket.emit('send-reply', val);
+            document.getElementById('reply-input').value = '';
+            document.getElementById('reply-input').disabled = true;
+            document.getElementById('btn-reply').disabled = true;
+            document.getElementById('reply-hint').innerText = '等待对方猜数...';
+        }
+
+        socket.on('reply-received', (data) => {
+            if (data.guesser === myPlayerNo) {
+                appendLog(`猜测 【${data.guessNum}】 反馈：【位置正确 ${data.count} 个】`, true);
+            } else {
+                appendLog(`对猜测 【${data.guessNum}】 回复：位置正确 ${data.count} 个`);
+            }
+        });
+
+        socket.on('turn-change', (data) => {
+            handleTurn(data.currentTurn);
+        });
+
+        socket.on('game-over', (data) => {
+            const isWinner = data.winner === myPlayerNo;
+            document.getElementById('win-title').innerText = isWinner ? '🎉 你赢了！' : '💔 你输了';
+            document.getElementById('win-desc').innerHTML = `玩家 1 密码：<b>${data.secrets[1]}</b><br>玩家 2 密码：<b>${data.secrets[2]}</b>`;
+            document.getElementById('win-modal').classList.add('show');
+        });
+
+        socket.on('player-disconnected', () => {
+            alert('对方离开或网络断开，页面将刷新！');
+            location.reload();
+        });
+
+        function appendLog(text, isHighlight = false) {
+            const box = document.getElementById('history-box');
+            const item = document.createElement('div');
+            item.className = `log-item ${isHighlight ? 'highlight' : ''}`;
+            item.innerText = text;
+            box.appendChild(item);
+            box.scrollTop = box.scrollHeight;
+        }
+    </script>
+</body>
+</html>
